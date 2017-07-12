@@ -1,0 +1,5 @@
+*~
+.*.sw?
+.sw?
+audit-snitch-server
+vendor

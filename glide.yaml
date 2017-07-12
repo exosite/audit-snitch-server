@@ -1,0 +1,10 @@
+package: github.com/exosite/audit-snitch-server
+import:
+- package: github.com/golang/protobuf
+  subpackages:
+  - proto
+- package: github.com/gin-gonic/gin
+  version: ^1.2.0
+- package: gopkg.in/yaml.v2
+- package: github.com/urfave/cli
+  version: ^1.19.1
