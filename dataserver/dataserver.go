@@ -2,46 +2,35 @@ package dataserver
 
 import (
 	"os"
-	"log"
 	"fmt"
 	"io/ioutil"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
 	"strings"
+	"errors"
+	"path/filepath"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/exosite/audit-snitch-server/audit"
+	log "github.com/sirupsen/logrus"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-func bytesWriter(writer *os.File, input <-chan []byte) {
-	for bytes := range input {
-		//log.Printf("Writing %d bytes...\n", len(bytes))
-		//log.Printf("Text:\n%s\n", string(bytes))
-		bytesWritten, err := writer.Write(bytes)
-		//log.Printf("Wrote %d bytes\n", bytesWritten)
-		if bytesWritten != len(bytes) {
-			log.Printf("Only wrote %d out of %d bytes.  Why?\n", bytesWritten, len(bytes))
-		}
-		if err != nil {
-			log.Printf("Failed to write: %s\n", err.Error())
-		}
-		writer.Sync()
-		/*log.Println("Flushing...")
-		err = writer.Flush()
-		if err != nil {
-			log.Println(err.Error())
-		}*/
-	}
-}
+var (
+	ErrNoPeerCertificates = errors.New("Peer did not present any certificates")
+	ErrTlsHandshakeFailed = errors.New("TLS Handshake failed")
+	ErrMultiplePeerCertificates = errors.New("Peer presented multiple certificates")
+)
 
 type DataServer struct {
 	keypair *tls.Certificate
 	caCerts *x509.CertPool
 	tlsConfig *tls.Config
+	machineLogsDir string
 }
 
-func New(certPath, keyPath, caCertPath string) (*DataServer, error) {
+func New(certPath, keyPath, caCertPath, machineLogsDir string) (*DataServer, error) {
 	cer, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return nil, err
@@ -69,6 +58,7 @@ func New(certPath, keyPath, caCertPath string) (*DataServer, error) {
 		keypair: &cer,
 		caCerts: clientCertPool,
 		tlsConfig: config,
+		machineLogsDir: machineLogsDir,
 	}, nil
 }
 
@@ -79,11 +69,7 @@ func (self *DataServer) Run(listenPort int) error{
 	}
 	defer ln.Close()
 
-	f, err := os.OpenFile("/tmp/server.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0755)
-	bytesChan := make(chan []byte)
-	go bytesWriter(f, bytesChan)
-	defer close(bytesChan)
-
+	log.Infof("Dataserver is running on port %d", listenPort)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -92,84 +78,155 @@ func (self *DataServer) Run(listenPort int) error{
 		tlsconn, ok := conn.(*tls.Conn)
 		if !ok {
 			conn.Close()
-			log.Println("Got a non-TLS connection?!?!?!?!?")
+			log.Infoln("Got a non-TLS connection?!?!?!?!?")
 			continue
 		}
-		go handleConnection(tlsconn, bytesChan)
+		go self.handleConnection(tlsconn)
 	}
 }
 
-func handleConnection(conn *tls.Conn, output chan<- []byte) {
-	defer conn.Close()
-	log.Printf("Remote IP: %s\n", conn.RemoteAddr().String())
+func getMachineName(conn *tls.Conn) (string, error) {
 	state := conn.ConnectionState()
 	if !state.HandshakeComplete {
 		err := conn.Handshake()
 		if err != nil {
-			log.Printf("Handshake failed: %s\n", err.Error())
-			return
+			return "", ErrTlsHandshakeFailed
 		}
 		state = conn.ConnectionState()
 	}
 	if state.PeerCertificates == nil || len(state.PeerCertificates) == 0 {
-		log.Println("No peer certificates?  HOW?")
-		return
+		return "", ErrNoPeerCertificates
 	}
 	if len(state.PeerCertificates) > 1 {
-		log.Println("Multiple peer certificates!  Using the first one...")
+		return "", ErrMultiplePeerCertificates
 	}
-	peerName := state.PeerCertificates[0].Subject.CommonName
+	return state.PeerCertificates[0].Subject.CommonName, nil
+}
+
+func (self *DataServer) handleConnection(conn *tls.Conn) {
+	defer conn.Close()
+
+	peerName, err := getMachineName(conn)
+	if err != nil {
+		log.Errorf("Failed to get machine name: %s", err.Error())
+		return
+	}
+
+	errorLogFilePath := filepath.Join(self.machineLogsDir, fmt.Sprintf("%s.err", peerName))
+	errLogbase := &log.Logger{
+		Out: &lumberjack.Logger{
+			Filename: errorLogFilePath,
+			MaxSize: 100, // This is in MB.
+			MaxBackups: 5,
+			MaxAge: 1, // This is in days.
+		},
+		Formatter: new(log.TextFormatter),
+		Hooks: make(log.LevelHooks),
+		Level: log.DebugLevel,
+	};
+	errLogger := errLogbase.WithFields(log.Fields{
+		"remote_ip": conn.RemoteAddr().String(),
+	})
+
+	machineLogFilePath := filepath.Join(self.machineLogsDir, fmt.Sprintf("%s.log", peerName))
+	machineLogbase := &log.Logger{
+		Out: &lumberjack.Logger{
+			Filename: machineLogFilePath,
+			MaxSize: 100, // This is in MB.
+			MaxBackups: 5,
+			MaxAge: 1, // This is in days.
+		},
+		Formatter: new(log.TextFormatter),
+		Hooks: make(log.LevelHooks),
+		Level: log.DebugLevel,
+	};
+	machineLogger := machineLogbase.WithFields(log.Fields{
+		"remote_ip": conn.RemoteAddr().String(),
+	})
+
 	for {
 		sizeBytes := make([]byte, 4)
 		bytesRead, err := conn.Read(sizeBytes)
 		if err != nil {
-			log.Printf("Failed to read message size: %s\n", err.Error())
+			errLogger.Errorf("Failed to read message size: %s", err.Error())
 			return
 		}
 		if bytesRead < 4 {
-			log.Printf("Only read %d bytes instead of 4\n", bytesRead)
+			errLogger.Errorf("Only read %d bytes instead of 4", bytesRead)
 			return
 		}
 		messageSize := binary.BigEndian.Uint32(sizeBytes)
 		messageBytes := make([]byte, messageSize)
 		bytesRead, err = conn.Read(messageBytes)
 		if err != nil {
-			log.Printf("Failed to read message: %s\n", err.Error())
+			errLogger.Errorf("Failed to read message: %s", err.Error())
 			return
 		}
 		if uint32(bytesRead) < messageSize {
-			log.Printf("Expected %d bytes but only read %d\n", messageSize, bytesRead)
+			errLogger.Errorf("Expected %d bytes but only read %d", messageSize, bytesRead)
 			return
 		}
 
 		report := &audit.SnitchReport{}
 		err = proto.Unmarshal(messageBytes, report)
 		if err != nil {
-			log.Printf("Failed to decode report: %s\n", err.Error())
+			errLogger.Errorf("Failed to decode report: %s", err.Error())
 			return
 		}
 		switch report.GetMessageType() {
 		case 0:
-			log.Printf("Client-side error: %s\n", string(report.GetPayload()))
+			errLogger.Errorf("Client-side error: %s", string(report.GetPayload()))
 		case 1:
-			err = recordProgramRun(peerName, report)
+			err = recordProgramRun(report, machineLogger)
 			if err != nil {
-				log.Printf("Failed to record program run report: %s\n", err.Error())
+				errLogger.Errorf("Failed to record program run report: %s", err.Error())
 			}
 		default:
-			log.Printf("Unknown message type: %d\n", report.GetMessageType())
+			errLogger.Errorf("Unknown message type: %d", report.GetMessageType())
 		}
 	}
 }
 
-func recordProgramRun(peerName string, report *audit.SnitchReport) error {
+func recordProgramRun(report *audit.SnitchReport, logger *log.Entry) error {
 	progRun := &audit.ProgramRun{}
 	err := proto.Unmarshal(report.GetPayload(), progRun)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("[%s] Program run: %s\n", peerName, strings.Join(progRun.GetArgs(), " "))
+	lgr := logger.WithFields(log.Fields{
+		"event": "program_run",
+		"syscall": progRun.GetSyscall(),
+		"success": progRun.GetSuccess(),
+		"exit_code": progRun.GetExit(),
+		"pid": progRun.GetPid(),
+		"uid": progRun.GetUid(),
+		"gid": progRun.GetGid(),
+		"auid": progRun.GetAuid(),
+		"euid": progRun.GetEuid(),
+		"egid": progRun.GetEgid(),
+		"suid": progRun.GetSuid(),
+		"sgid": progRun.GetSgid(),
+		"fsuid": progRun.GetFsuid(),
+		"fsgid": progRun.GetFsgid(),
+		"command": progRun.GetComm(),
+		"exe": progRun.GetExe(),
+	})
+
+	tty := progRun.GetTty()
+	if tty != "" {
+		lgr = lgr.WithFields(log.Fields{
+			"tty": tty,
+		})
+	}
+	subj := progRun.GetSubj()
+	if subj != "" {
+		lgr = lgr.WithFields(log.Fields{
+			"selinux_subject": subj,
+		})
+	}
+
+	lgr.Info(strings.Join(progRun.GetArgs(), " "))
 
 	return nil
 }

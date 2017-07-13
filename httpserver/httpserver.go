@@ -1,7 +1,6 @@
 package httpserver
 
 import (
-	"log"
 	"fmt"
 	"time"
 	"io"
@@ -19,6 +18,7 @@ import (
 	"encoding/pem"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -138,6 +138,7 @@ func (self *HttpServer) createCert(csr *x509.CertificateRequest) ([]byte, error)
 func (self *HttpServer) v1Provision(c *gin.Context) {
 	r := c.Request
 	if r.Body == nil {
+		log.Errorln("No CSR!")
 		c.String(http.StatusBadRequest, "No CSR")
 		return
 	}
@@ -146,6 +147,7 @@ func (self *HttpServer) v1Provision(c *gin.Context) {
 	lr := &io.LimitedReader{R: r.Body, N: 8 * 1024}
 	bodyBytes, err := ioutil.ReadAll(lr)
 	if err != nil {
+		log.Errorln(err.Error())
 		// Returning anything is probably futile, since the
 		// connection probably died.  Let's try anyway!
 		c.String(http.StatusBadRequest, "Failed to read CSR")
@@ -154,43 +156,51 @@ func (self *HttpServer) v1Provision(c *gin.Context) {
 
 	csrSigStr := c.Request.Header.Get("CSR-Signature")
 	if csrSigStr == "" {
+		log.Errorln(err.Error())
 		c.String(http.StatusBadRequest, "No CSR signature")
 		return
 	}
 
 	csrSig, err := base64.StdEncoding.DecodeString(csrSigStr)
 	if err != nil {
+		log.Errorln(err.Error())
 		c.String(http.StatusBadRequest, "Invalid CSR external signature")
 		return
 	}
 
 	hmacSig := self.computeHmac(bodyBytes)
 	if !hmac.Equal(hmacSig, csrSig) {
+		log.Errorln(err.Error())
 		c.String(http.StatusBadRequest, "Invalid CSR external signature")
 		return
 	}
 
 	csr, _, err := csrFromPem(bodyBytes)
 	if err != nil {
-		log.Println(err.Error())
+		log.Errorln(err.Error())
 		c.String(http.StatusBadRequest, "Malformed CSR")
 		return
 	}
 
 	asn1Cert, err := self.createCert(csr)
 	if err != nil {
-		c.String(http.StatusInternalServerError, "Failed to sign client certificate: %s", err.Error())
+		log.Errorln(err.Error())
+		c.String(http.StatusInternalServerError, "Failed to sign client certificate")
 		return
 	}
 
 	pemCert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: asn1Cert})
 
 	c.Data(http.StatusOK, "application/octet-stream", pemCert)
+	log.WithFields(log.Fields{
+		"remote_ip": c.ClientIP(),
+	}).Infof("Provisioned machine: %s", csr.Subject.CommonName)
 }
 
 func (self *HttpServer) Run(listenPort int, certFile string, keyFile string) {
 	r := gin.Default()
 	v1 := r.Group("/v1")
 	v1.PUT("/provision", self.v1Provision)
+	log.Infof("HTTP server is running on port %d", listenPort)
 	r.RunTLS(fmt.Sprintf(":%d", listenPort), certFile, keyFile)
 }

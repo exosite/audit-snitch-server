@@ -1,5 +1,5 @@
-hash: a9fd4f832f225f099d511a576d726450ff0a9b146a03559431bbe30a3ec88eae
-updated: 2017-07-11T15:00:08.038409272-05:00
+hash: e5799b48e2f8f8abbf2a7a27f51e66e5e9c0878ac397669bf9a371a9d49df919
+updated: 2017-07-13T09:40:36.391259567-05:00
 imports:
 - name: github.com/gin-contrib/sse
   version: 22d885f9ecc78bf4ee5d72b937e4bbcdc58e8cae
@@ -9,11 +9,13 @@ imports:
   - binding
   - render
 - name: github.com/golang/protobuf
-  version: 6a1fa9404c0aebf36c879bc50152edcc953910d2
+  version: 0a4f71a498b7c4812f64969510bcb4eca251e33a
   subpackages:
   - proto
 - name: github.com/mattn/go-isatty
   version: fc9e8d8ef48496124e79ae0df75490096eccf6fe
+- name: github.com/sirupsen/logrus
+  version: a3f95b5c423586578a4e099b11a46c2479628cac
 - name: github.com/ugorji/go
   version: 5efa3251c7f7d05e5d9704a69a984ec9f1386a40
   subpackages:
@@ -26,6 +28,8 @@ imports:
   - unix
 - name: gopkg.in/go-playground/validator.v8
   version: 5f57d2222ad794d0dffb07e664ea05e2ee07d60c
+- name: gopkg.in/natefinch/lumberjack.v2
+  version: a96e63847dc3c67d17befa69c303767e2f84e54f
 - name: gopkg.in/yaml.v2
-  version: cd8b52f8269e0feb286dfeef29f8fe4d5b397e0b
+  version: 1be3d31502d6eabc0dd7ce5b0daab022e14a5538
 testImports: []

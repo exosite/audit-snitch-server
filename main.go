@@ -21,8 +21,10 @@ import (
 	"io/ioutil"
 	"encoding/base64"
 
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 	"github.com/urfave/cli"
+	"gopkg.in/natefinch/lumberjack.v2"
 	"github.com/exosite/audit-snitch-server/httpserver"
 	"github.com/exosite/audit-snitch-server/dataserver"
 )
@@ -32,6 +34,7 @@ type DataServerConfig struct {
 	CertPath string `yaml:"cert_path"`
 	KeyPath string `yaml:"key_path"`
 	CACertPath string `yaml:"cacert_path"`
+	MachineLogsDir string `yaml:"machine_logs_dir"`
 }
 
 type HttpServerConfig struct {
@@ -46,6 +49,7 @@ type HttpServerConfig struct {
 type Config struct {
 	DataServer DataServerConfig `yaml:"dataserver"`
 	HttpServer HttpServerConfig `yaml:"httpserver"`
+	LogFilePath string `yaml:"logfile_path"`
 }
 
 func main() {
@@ -76,7 +80,19 @@ func runServer(c *cli.Context) {
 		panic(err)
 	}
 
-	dataServer, err := dataserver.New(config.DataServer.CertPath, config.DataServer.KeyPath, config.DataServer.CACertPath)
+	log.SetOutput(&lumberjack.Logger{
+		Filename: config.LogFilePath,
+		MaxSize: 100, // This is in MB.
+		MaxBackups: 5,
+		MaxAge: 28, // This is in days.
+	})
+
+	dataServer, err := dataserver.New(
+		config.DataServer.CertPath,
+		config.DataServer.KeyPath,
+		config.DataServer.CACertPath,
+		config.DataServer.MachineLogsDir,
+	)
 	if err != nil {
 		panic(err)
 	}
