@@ -18,6 +18,8 @@ package dataserver
 
 import (
 	"os"
+	"net"
+	"time"
 	"fmt"
 	"io/ioutil"
 	"crypto/tls"
@@ -119,6 +121,89 @@ func getMachineName(conn *tls.Conn) (string, error) {
 	return state.PeerCertificates[0].Subject.CommonName, nil
 }
 
+type dsLogger struct {
+	ErrLogger *log.Entry
+	ErrJack *lumberjack.Logger
+	MachineLogger *log.Entry
+	MachineJack *lumberjack.Logger
+	LastRotation time.Time
+	PeerName string
+}
+
+func (self *DataServer) setupLogging(remoteip, peerName string) *dsLogger {
+	now := time.Now()
+	// If we have no other information, assume that last rotation happened
+	// at the most recent midnight.
+	lastRotation := time.Date(
+		now.Year(),
+		now.Month(),
+		now.Day(),
+		0, 0, 0, 0, now.Location())
+
+	errorLogFilePath := filepath.Join(self.machineLogsDir, fmt.Sprintf("%s.err", peerName))
+	errJack := &lumberjack.Logger{
+		Filename: errorLogFilePath,
+		MaxSize: 100, // This is in MB.
+		MaxBackups: 5,
+		MaxAge: 30, // This is in days, but it affects deletion, not rotation.
+	}
+	errLogbase := &log.Logger{
+		Out: errJack,
+		Formatter: new(log.TextFormatter),
+		Hooks: make(log.LevelHooks),
+		Level: log.DebugLevel,
+	};
+	errLogger := errLogbase.WithFields(log.Fields{
+		"remote_ip": remoteip,
+	})
+
+	machineLogFilePath := filepath.Join(self.machineLogsDir, fmt.Sprintf("%s.log", peerName))
+	machineLogStat, err := os.Stat(errorLogFilePath)
+	if err == nil {
+		logmtime := machineLogStat.ModTime()
+		// Assume it was last rotated at midnight on the day it was last modified.
+		lastRotation = time.Date(
+			logmtime.Year(),
+			logmtime.Month(),
+			logmtime.Day(),
+			0, 0, 0, 0, logmtime.Location())
+	}
+	machineJack := &lumberjack.Logger{
+		Filename: machineLogFilePath,
+		MaxSize: 100, // This is in MB.
+		MaxBackups: 5,
+		MaxAge: 30, // This is in days, but it affects deletion, not rotation.
+	}
+	machineLogbase := &log.Logger{
+		Out: machineJack,
+		Formatter: new(log.TextFormatter),
+		Hooks: make(log.LevelHooks),
+		Level: log.DebugLevel,
+	};
+	machineLogger := machineLogbase.WithFields(log.Fields{
+		"remote_ip": remoteip,
+	})
+
+	return &dsLogger{
+		ErrLogger: errLogger,
+		ErrJack: errJack,
+		MachineLogger: machineLogger,
+		MachineJack: machineJack,
+		LastRotation: lastRotation,
+		PeerName: peerName,
+	}
+}
+
+func (self *dsLogger) tryRotateLogs() {
+	now := time.Now()
+	if now.Sub(self.LastRotation) > 24 * time.Hour {
+		self.ErrJack.Rotate()
+		self.MachineJack.Rotate()
+		self.LastRotation = now
+		log.Infof("Rotated logs for %s", self.PeerName)
+	}
+}
+
 func (self *DataServer) handleConnection(conn *tls.Conn) {
 	defer conn.Close()
 
@@ -128,77 +213,56 @@ func (self *DataServer) handleConnection(conn *tls.Conn) {
 		return
 	}
 
-	errorLogFilePath := filepath.Join(self.machineLogsDir, fmt.Sprintf("%s.err", peerName))
-	errLogbase := &log.Logger{
-		Out: &lumberjack.Logger{
-			Filename: errorLogFilePath,
-			MaxSize: 100, // This is in MB.
-			MaxBackups: 5,
-			MaxAge: 1, // This is in days.
-		},
-		Formatter: new(log.TextFormatter),
-		Hooks: make(log.LevelHooks),
-		Level: log.DebugLevel,
-	};
-	errLogger := errLogbase.WithFields(log.Fields{
-		"remote_ip": conn.RemoteAddr().String(),
-	})
+	logger := self.setupLogging(conn.RemoteAddr().String(), peerName)
 
-	machineLogFilePath := filepath.Join(self.machineLogsDir, fmt.Sprintf("%s.log", peerName))
-	machineLogbase := &log.Logger{
-		Out: &lumberjack.Logger{
-			Filename: machineLogFilePath,
-			MaxSize: 100, // This is in MB.
-			MaxBackups: 5,
-			MaxAge: 1, // This is in days.
-		},
-		Formatter: new(log.TextFormatter),
-		Hooks: make(log.LevelHooks),
-		Level: log.DebugLevel,
-	};
-	machineLogger := machineLogbase.WithFields(log.Fields{
-		"remote_ip": conn.RemoteAddr().String(),
-	})
+	// Check if we should rotate logs before we do anything else.
+	logger.tryRotateLogs()
 
 	for {
 		sizeBytes := make([]byte, 4)
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 		bytesRead, err := conn.Read(sizeBytes)
 		if err != nil {
-			errLogger.Errorf("Failed to read message size: %s", err.Error())
+			netErr, ok := err.(net.Error)
+			if ok && netErr.Timeout() {
+				logger.tryRotateLogs()
+				continue
+			}
+			logger.ErrLogger.Errorf("Failed to read message size: %s", err.Error())
 			return
 		}
 		if bytesRead < 4 {
-			errLogger.Errorf("Only read %d bytes instead of 4", bytesRead)
+			logger.ErrLogger.Errorf("Only read %d bytes instead of 4", bytesRead)
 			return
 		}
 		messageSize := binary.BigEndian.Uint32(sizeBytes)
 		messageBytes := make([]byte, messageSize)
 		bytesRead, err = conn.Read(messageBytes)
 		if err != nil {
-			errLogger.Errorf("Failed to read message: %s", err.Error())
+			logger.ErrLogger.Errorf("Failed to read message: %s", err.Error())
 			return
 		}
 		if uint32(bytesRead) < messageSize {
-			errLogger.Errorf("Expected %d bytes but only read %d", messageSize, bytesRead)
+			logger.ErrLogger.Errorf("Expected %d bytes but only read %d", messageSize, bytesRead)
 			return
 		}
 
 		report := &audit.SnitchReport{}
 		err = proto.Unmarshal(messageBytes, report)
 		if err != nil {
-			errLogger.Errorf("Failed to decode report: %s", err.Error())
+			logger.ErrLogger.Errorf("Failed to decode report: %s", err.Error())
 			return
 		}
 		switch report.GetMessageType() {
 		case 0:
-			errLogger.Errorf("Client-side error: %s", string(report.GetPayload()))
+			logger.ErrLogger.Errorf("Client-side error: %s", string(report.GetPayload()))
 		case 1:
-			err = recordProgramRun(report, machineLogger)
+			err = recordProgramRun(report, logger.MachineLogger)
 			if err != nil {
-				errLogger.Errorf("Failed to record program run report: %s", err.Error())
+				logger.ErrLogger.Errorf("Failed to record program run report: %s", err.Error())
 			}
 		default:
-			errLogger.Errorf("Unknown message type: %d", report.GetMessageType())
+			logger.ErrLogger.Errorf("Unknown message type: %d", report.GetMessageType())
 		}
 	}
 }
