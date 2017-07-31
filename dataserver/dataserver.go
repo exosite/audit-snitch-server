@@ -116,7 +116,10 @@ func getMachineName(conn *tls.Conn) (string, error) {
 		return "", ErrNoPeerCertificates
 	}
 	if len(state.PeerCertificates) > 1 {
-		return "", ErrMultiplePeerCertificates
+		// openssl s_client sends the CA cert along with the client cert.  WTF?
+		if state.PeerCertificates[1].Subject.CommonName != state.PeerCertificates[1].Issuer.CommonName {
+			return "", ErrMultiplePeerCertificates
+		}
 	}
 	return state.PeerCertificates[0].Subject.CommonName, nil
 }
@@ -210,6 +213,12 @@ func (self *DataServer) handleConnection(conn *tls.Conn) {
 	peerName, err := getMachineName(conn)
 	if err != nil {
 		log.Errorf("Failed to get machine name: %s", err.Error())
+		if err == ErrMultiplePeerCertificates {
+			state := conn.ConnectionState()
+			for i, cert := range state.PeerCertificates {
+				log.Infof("Cert {}: {} issued by {}", i, cert.Subject.CommonName, cert.Issuer.CommonName)
+			}
+		}
 		return
 	}
 
