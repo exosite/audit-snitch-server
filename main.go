@@ -101,7 +101,7 @@ func runServer(c *cli.Context) {
 	if err != nil {
 		panic(err)
 	}
-	httpServer, err := httpserver.New(apiKey, config.HttpServer.CAKeyPath, config.HttpServer.CACertPath)
+	httpServer, err := httpserver.New(apiKey, config.HttpServer.CAKeyPath, config.HttpServer.CACertPath, dataServer)
 	if err != nil {
 		panic(err)
 	}

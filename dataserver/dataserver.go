@@ -41,11 +41,143 @@ var (
 	ErrMultiplePeerCertificates = errors.New("Peer presented multiple certificates")
 )
 
+type DsRecords map[string][]int
+
+type dsRecordKeeperOp struct {
+	op int
+	name string
+	port int
+	resp chan DsRecords
+}
+
+func addRecordOp(name string, port int) *dsRecordKeeperOp {
+	return &dsRecordKeeperOp{
+		op: 1,
+		name: name,
+		port: port,
+		resp: nil,
+	}
+}
+
+func rmRecordOp(name string, port int) *dsRecordKeeperOp {
+	return &dsRecordKeeperOp{
+		op: 2,
+		name: name,
+		port: port,
+		resp: nil,
+	}
+}
+
+func dumpRecordOp(resp chan DsRecords) *dsRecordKeeperOp {
+	return &dsRecordKeeperOp{
+		op: 3,
+		name: "",
+		port: 0,
+		resp: resp,
+	}
+}
+
+func (self *dsRecordKeeperOp) Apply(records DsRecords) DsRecords {
+	switch self.op {
+	case 1:
+		rec, ok := records[self.name]
+		if !ok {
+			rec = make([]int, 0)
+		}
+		records[self.name] = append(rec, self.port)
+		return records
+	case 2:
+		rec, ok := records[self.name]
+		if !ok {
+			return records
+		}
+
+		// If there's only one record (usual case),
+		// just delete the whole thing if the port
+		// matches.
+		if len(rec) == 1 {
+			if rec[0] == self.port {
+				delete(records, self.name)
+				return records
+			} else {
+				return records
+			}
+		}
+
+		// There's more than one record, so find the one
+		// where the port matches and nuke it.
+		target := -1
+		for i, v := range rec {
+			if v == self.port {
+				target = i
+			}
+		}
+		if target == -1 {
+			return records
+		}
+		rec = append(rec[:target], rec[target+1:]...)
+		records[self.name] = rec
+		return records
+	case 3:
+		newMap := make(DsRecords)
+		for k, v := range records {
+			newV := make([]int, len(v))
+			copy(newV, v)
+			newMap[k] = newV
+		}
+		self.resp <- newMap
+		return records
+	default:
+		return records
+	}
+}
+
+type dsRecordKeeper struct {
+	records DsRecords
+	opChan chan *dsRecordKeeperOp
+}
+
+func newDsRecordKeeper() *dsRecordKeeper {
+	rk := &dsRecordKeeper{
+		records: make(DsRecords),
+		opChan: make(chan *dsRecordKeeperOp, 100),
+	}
+	go rk.mainloop()
+
+	return rk
+}
+
+func (self *dsRecordKeeper) mainloop() {
+	for op := range self.opChan {
+		self.records = op.Apply(self.records)
+	}
+}
+
+func (self *dsRecordKeeper) Close() {
+	close(self.opChan)
+}
+
+func (self *dsRecordKeeper) AddRecord(name string, port int) {
+	self.opChan <- addRecordOp(name, port)
+}
+
+func (self *dsRecordKeeper) RmRecord(name string, port int) {
+	self.opChan <- rmRecordOp(name, port)
+}
+
+func (self *dsRecordKeeper) DumpRecords() DsRecords {
+	resp := make(chan DsRecords)
+	self.opChan <- dumpRecordOp(resp)
+	recs := <-resp
+	return recs
+}
+
 type DataServer struct {
 	keypair *tls.Certificate
 	caCerts *x509.CertPool
 	tlsConfig *tls.Config
 	machineLogsDir string
+	recordKeeper *dsRecordKeeper
 }
 
 func New(certPath, keyPath, caCertPath, machineLogsDir string) (*DataServer, error) {
@@ -77,7 +209,16 @@ func New(certPath, keyPath, caCertPath, machineLogsDir string) (*DataServer, err
 		caCerts: clientCertPool,
 		tlsConfig: config,
 		machineLogsDir: machineLogsDir,
+		recordKeeper: newDsRecordKeeper(),
 	}, nil
+}
+
+func (self *DataServer) Close() {
+	self.recordKeeper.Close()
+}
+
+func (self *DataServer) DumpRecords() DsRecords {
+	return self.recordKeeper.DumpRecords()
 }
 
 func (self *DataServer) Run(listenPort int) error{
@@ -221,6 +362,16 @@ func (self *DataServer) handleConnection(conn *tls.Conn) {
 		}
 		return
 	}
+
+	remoteAddr := conn.RemoteAddr()
+	remoteAddrTcp, ok := remoteAddr.(*net.TCPAddr)
+	if !ok {
+		log.Errorf("Could not obtain the remote address for connection from %s", peerName)
+		return
+	}
+	remotePort := remoteAddrTcp.Port
+	self.recordKeeper.AddRecord(peerName, remotePort)
+	defer self.recordKeeper.RmRecord(peerName, remotePort)
 
 	logger := self.setupLogging(conn.RemoteAddr().String(), peerName)
 

@@ -19,6 +19,7 @@ package httpserver
 import (
 	"fmt"
 	"time"
+	"strconv"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -35,6 +36,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
+
+	ds "github.com/exosite/audit-snitch-server/dataserver"
 )
 
 var (
@@ -50,6 +53,7 @@ type HttpServer struct {
 	apiKey []byte
 	privateKey *ecdsa.PrivateKey
 	publicCert *x509.Certificate
+	dataServer *ds.DataServer
 }
 
 func ecKeyFromPem(pemData []byte) (*ecdsa.PrivateKey, []byte, error) {
@@ -82,7 +86,7 @@ func csrFromPem(pemData []byte) (*x509.CertificateRequest, []byte, error) {
 	return csr, remaining, err
 }
 
-func New(apiKey []byte, privateKeyPath, publicCertPath string) (*HttpServer, error) {
+func New(apiKey []byte, privateKeyPath, publicCertPath string, dataServer *ds.DataServer) (*HttpServer, error) {
 	privateKeyBytes, err := ioutil.ReadFile(privateKeyPath)
 	if err != nil {
 		return nil, err
@@ -105,6 +109,7 @@ func New(apiKey []byte, privateKeyPath, publicCertPath string) (*HttpServer, err
 		apiKey: apiKey,
 		privateKey: privateKey,
 		publicCert: publicCert,
+		dataServer: dataServer,
 	}, nil
 }
 
@@ -170,9 +175,9 @@ func (self *HttpServer) v1Provision(c *gin.Context) {
 		return
 	}
 
-	csrSigStr := c.Request.Header.Get("CSR-Signature")
+	csrSigStr := r.Header.Get("CSR-Signature")
 	if csrSigStr == "" {
-		log.Errorln(err.Error())
+		log.Errorln("No CSR signature")
 		c.String(http.StatusBadRequest, "No CSR signature")
 		return
 	}
@@ -213,10 +218,69 @@ func (self *HttpServer) v1Provision(c *gin.Context) {
 	}).Infof("Provisioned machine: %s", csr.Subject.CommonName)
 }
 
+func abs(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+func (self *HttpServer) v1Clients(c *gin.Context) {
+	requestTimestampStr := c.Request.Header.Get("Request-Timestamp")
+	if requestTimestampStr == "" {
+		c.String(http.StatusBadRequest, "No Request-Timestamp header")
+		return
+	}
+
+	requestTimestamp, err := strconv.ParseInt(requestTimestampStr, 10, 64)
+	if err != nil {
+		log.Errorln(err.Error())
+		c.String(http.StatusBadRequest, "Invalid Request-Timestamp header")
+		return
+	}
+
+	utcUnix := time.Now().UTC().Unix()
+	log.Infof("UTC Unix timestamp: %d", utcUnix)
+	timeSince := abs(utcUnix - requestTimestamp)
+	if timeSince > 300 {
+		msg := fmt.Sprintf(
+			"Too much time (%d seconds) has elapsed since request was sent",
+			timeSince,
+		)
+		log.Errorln(msg)
+		c.String(http.StatusBadRequest, msg)
+		return
+	}
+
+	dtSigStr := c.Request.Header.Get("Timestamp-Signature")
+	if dtSigStr == "" {
+		log.Errorln(err.Error())
+		c.String(http.StatusBadRequest, "No Timestamp-Signature header")
+		return
+	}
+
+	dtSig, err := base64.StdEncoding.DecodeString(dtSigStr)
+	if err != nil {
+		log.Errorln(err.Error())
+		c.String(http.StatusBadRequest, "Invalid date/time signature")
+		return
+	}
+
+	hmacSig := self.computeHmac([]byte(requestTimestampStr))
+	if !hmac.Equal(hmacSig, dtSig) {
+		log.Errorln(err.Error())
+		c.String(http.StatusBadRequest, "Invalid date/time signature")
+		return
+	}
+
+	c.JSON(http.StatusOK, self.dataServer.DumpRecords())
+}
+
 func (self *HttpServer) Run(listenPort int, certFile string, keyFile string) {
 	r := gin.Default()
 	v1 := r.Group("/v1")
 	v1.PUT("/provision", self.v1Provision)
+	v1.GET("/clients", self.v1Clients)
 	log.Infof("HTTP server is running on port %d", listenPort)
 	r.RunTLS(fmt.Sprintf(":%d", listenPort), certFile, keyFile)
 }
