@@ -50,6 +50,7 @@ type Config struct {
 	DataServer DataServerConfig `yaml:"dataserver"`
 	HttpServer HttpServerConfig `yaml:"httpserver"`
 	LogFilePath string `yaml:"logfile_path"`
+	LogLevel string `yaml:"log_level"`
 }
 
 func main() {
@@ -78,6 +79,23 @@ func runServer(c *cli.Context) {
 	err = yaml.Unmarshal(configBytes, &config)
 	if err != nil {
 		panic(err)
+	}
+
+	switch config.LogLevel {
+	case "debug":
+		log.SetLevel(log.DebugLevel)
+	case "info":
+		log.SetLevel(log.InfoLevel)
+	case "warn":
+		log.SetLevel(log.WarnLevel)
+	case "error":
+		log.SetLevel(log.ErrorLevel)
+	case "fatal":
+		log.SetLevel(log.FatalLevel)
+	case "panic":
+		log.SetLevel(log.PanicLevel)
+	default:
+		log.SetLevel(log.ErrorLevel)
 	}
 
 	log.SetOutput(&lumberjack.Logger{
