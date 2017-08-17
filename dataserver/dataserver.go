@@ -421,6 +421,8 @@ func (self *DataServer) handleConnection(conn *tls.Conn) {
 			if err != nil {
 				logger.ErrLogger.Errorf("Failed to record program run report: %s", err.Error())
 			}
+		case 2:
+			log.Debugf("Received keepalive message from client %s", peerName)
 		default:
 			logger.ErrLogger.Errorf("Unknown message type: %d", report.GetMessageType())
 		}
