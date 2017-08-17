@@ -268,7 +268,6 @@ func (self *HttpServer) v1Clients(c *gin.Context) {
 
 	hmacSig := self.computeHmac([]byte(requestTimestampStr))
 	if !hmac.Equal(hmacSig, dtSig) {
-		log.Errorln(err.Error())
 		c.String(http.StatusBadRequest, "Invalid date/time signature")
 		return
 	}
