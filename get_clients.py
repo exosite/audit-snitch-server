@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 import hmac
 
-from pprint import pprint
 from datetime import datetime, timezone
 from base64 import b64encode, b64decode
 
@@ -31,6 +31,12 @@ url = "https://{}/v1/clients".format(snitch_server)
 requests.packages.urllib3.disable_warnings(SubjectAltNameWarning)
 r = requests.get(url, headers=headers, verify=os.getenv("SNITCH_CA_PATH"))
 if r.status_code == 200:
-    pprint(r.json())
+    for client, ports in r.json().items():
+        if len(ports) > 1:
+            print("{}: More than one connection!".format(client))
+        else:
+            print(client)
+    sys.exit(0)
 else:
     print(r.text)
+    sys.exit(1)
